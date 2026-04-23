@@ -1,8 +1,11 @@
 # MSSQL → DrawDB Diagram Generator
 
-Generates `.dbml` files from a Microsoft SQL Server database for import into [DrawDB](https://drawdb.app). DrawDB's native MSSQL DDL import is broken, so this tool generates DBML format instead.
+Generates `.dbml` files from a Microsoft SQL Server database for import into [DrawDB](https://drawdb.app). DrawDB's native MSSQL DDL import is broken, so this tool queries the live schema directly and produces DBML instead.
 
-For each table listed in `tables.csv`, the script discovers all FK relationships (inbound and outbound), related tables, and writes a `.dbml` file containing only the columns that participate in those relationships. Tables with 500+ columns are kept readable this way.
+For each table listed in `tables.csv`, the script discovers FK relationships (inbound and outbound) and writes a `.dbml` file per table. Two flags control what gets included:
+
+- **Column mode** — either just the columns that participate in PKs/FKs (default, keeps large tables readable), or every column in each table (`--all-columns`)
+- **Traversal depth** — how many FK hops to follow outward from the base table (`--depth N`, default: 1)
 
 ## Setup
 
@@ -40,36 +43,44 @@ ID,Schema,Table Name
 2,dbo,Customers
 ```
 
+If you're unsure about case, run `fix_table_names.py` first (see below).
+
 ## Usage
 
-Optionally fix any case mismatches between your CSV and the database:
+```bash
+# Keys/FK columns only, 1 level deep (original behavior)
+.venv/bin/python3 generate_diagrams.py
+
+# Include every column in each table
+.venv/bin/python3 generate_diagrams.py --all-columns
+
+# Follow FK relationships 3 levels deep
+.venv/bin/python3 generate_diagrams.py --depth 3
+
+# Both flags combined
+.venv/bin/python3 generate_diagrams.py --all-columns --depth 2
+```
+
+Output `.dbml` files are written to `output/` named `<id>-<schema>-<table>.dbml`. Import each into DrawDB via **Import → DBML**.
+
+To correct case mismatches between `tables.csv` and the live database before generating:
 
 ```bash
 .venv/bin/python3 fix_table_names.py
 ```
 
-Then generate the diagrams:
-
-```bash
-.venv/bin/python3 generate_diagrams.py
-```
-
-Output `.dbml` files are written to `output/` named `<id>-<schema>-<table>.dbml`. Import each into DrawDB via **Import → DBML**.
-
 ## Configuration
-
-At the top of `generate_diagrams.py`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `INCLUDE_VIEWS` | `False` | Set to `True` to include dependent views in diagrams |
+| `INCLUDE_VIEWS` | `False` | Set to `True` in `generate_diagrams.py` to include views that depend on the base table |
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `generate_diagrams.py` | Main script |
-| `fix_table_names.py` | Corrects case mismatches in tables.csv against the live database |
+| `fix_table_names.py` | Corrects case mismatches in `tables.csv` against the live database |
 | `tables.csv` | List of base tables to diagram |
 | `.env` | DB credentials (not committed) |
 | `.env.example` | Credentials template |

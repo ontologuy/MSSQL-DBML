@@ -1,3 +1,4 @@
+import argparse
 import csv
 import os
 import sys
@@ -79,6 +80,14 @@ WHERE c.object_id = OBJECT_ID(?)
 ORDER BY c.column_id
 """
 
+COLUMN_ALL_QUERY = """
+SELECT c.name, t.name AS type_name, c.max_length, c.precision, c.scale, c.is_nullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID(?)
+ORDER BY c.column_id
+"""
+
 
 # ── type formatting ────────────────────────────────────────────────────────────
 
@@ -142,6 +151,17 @@ def fetch_column_info(cursor, schema, table, col_names):
     }
 
 
+def fetch_all_column_info(cursor, schema, table):
+    cursor.execute(COLUMN_ALL_QUERY, f"{schema}.{table}")
+    return {
+        r.name: {
+            "type": format_type(r.type_name, r.max_length, r.precision, r.scale),
+            "nullable": bool(r.is_nullable),
+        }
+        for r in cursor.fetchall()
+    }
+
+
 # ── DBML generation ────────────────────────────────────────────────────────────
 
 def qualified(schema, table):
@@ -195,56 +215,86 @@ def generate_dbml(base_schema, base_table, tables_data, views_data, relationship
 
 # ── main diagram builder ───────────────────────────────────────────────────────
 
-def build_diagram(cursor, base_schema, base_table):
-    fk_rows = fetch_fk_relationships(cursor, base_schema, base_table)
+def build_diagram(cursor, base_schema, base_table, depth=1, all_columns=False):
+    # BFS: expand FK neighbours up to `depth` levels
+    visited = {(base_schema, base_table)}
+    frontier = {(base_schema, base_table)}
+    all_fks: list[dict] = []
+    seen_fk_names: set[str] = set()
 
-    # Collect all tables that appear in FK relationships with the base table
-    diagram_table_keys = {(base_schema, base_table)}
-    for r in fk_rows:
-        diagram_table_keys.add((r["from_schema"], r["from_table"]))
-        diagram_table_keys.add((r["to_schema"], r["to_table"]))
+    for _ in range(depth):
+        next_frontier: set[tuple] = set()
+        for (s, t) in frontier:
+            for r in fetch_fk_relationships(cursor, s, t):
+                if r["fk_name"] not in seen_fk_names:
+                    seen_fk_names.add(r["fk_name"])
+                    all_fks.append(r)
+                for neighbor in ((r["from_schema"], r["from_table"]), (r["to_schema"], r["to_table"])):
+                    if neighbor not in visited:
+                        next_frontier.add(neighbor)
+                        visited.add(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
 
-    # Filter relationships to only those between diagram tables
-    diagram_fks = [
-        r for r in fk_rows
-        if (r["from_schema"], r["from_table"]) in diagram_table_keys
-        and (r["to_schema"], r["to_table"]) in diagram_table_keys
-    ]
+    diagram_table_keys = visited
 
-    # Collect which columns we need per table (PKs + FK cols)
-    needed_cols: dict[tuple, set] = {k: set() for k in diagram_table_keys}
-    for r in diagram_fks:
-        needed_cols[(r["from_schema"], r["from_table"])].add(r["from_col"])
-        needed_cols[(r["to_schema"], r["to_table"])].add(r["to_col"])
+    # Deduplicate by column-level tuple — the DB may have multiple FK constraints
+    # with different names mapping the same column pair
+    seen_col_rels: set[tuple] = set()
+    diagram_fks = []
+    for r in all_fks:
+        if (r["from_schema"], r["from_table"]) not in diagram_table_keys:
+            continue
+        if (r["to_schema"], r["to_table"]) not in diagram_table_keys:
+            continue
+        col_key = (r["from_schema"], r["from_table"], r["from_col"], r["to_schema"], r["to_table"], r["to_col"])
+        if col_key not in seen_col_rels:
+            seen_col_rels.add(col_key)
+            diagram_fks.append(r)
 
-    # Always include PK columns
+    # Collect PK columns (always needed for annotations)
     pk_map: dict[tuple, set] = {}
     for key in diagram_table_keys:
-        pks = fetch_pk_columns(cursor, *key)
-        pk_map[key] = pks
-        needed_cols[key].update(pks)
+        pk_map[key] = fetch_pk_columns(cursor, *key)
 
-    # Fetch column type info for only the needed columns
     tables_data = {}
-    for key in diagram_table_keys:
-        cols = sorted(needed_cols[key])
-        col_info = fetch_column_info(cursor, *key, cols) if cols else {}
-        is_base = key == (base_schema, base_table)
-        tables_data[key] = (col_info, pk_map[key], is_base)
+    if all_columns:
+        for key in diagram_table_keys:
+            col_info = fetch_all_column_info(cursor, *key)
+            is_base = key == (base_schema, base_table)
+            tables_data[key] = (col_info, pk_map[key], is_base)
+    else:
+        # Keys-only: include PK columns + columns involved in FK relationships
+        needed_cols: dict[tuple, set] = {k: set() for k in diagram_table_keys}
+        for r in diagram_fks:
+            needed_cols[(r["from_schema"], r["from_table"])].add(r["from_col"])
+            needed_cols[(r["to_schema"], r["to_table"])].add(r["to_col"])
+        for key in diagram_table_keys:
+            needed_cols[key].update(pk_map[key])
 
-    # Discover views dependent on the base table
+        for key in diagram_table_keys:
+            cols = sorted(needed_cols[key])
+            col_info = fetch_column_info(cursor, *key, cols) if cols else {}
+            is_base = key == (base_schema, base_table)
+            tables_data[key] = (col_info, pk_map[key], is_base)
+
     if not INCLUDE_VIEWS:
         return tables_data, {}, diagram_fks
 
     view_keys = fetch_dependent_views(cursor, base_schema, base_table)
-    known_fk_col_names = {col for cols in needed_cols.values() for col in cols}
+    known_col_names: set[str] = set()
+    for col_info, _, _ in tables_data.values():
+        known_col_names.update(col_info.keys())
 
     views_data = {}
     for vkey in view_keys:
         v_schema, v_name = vkey
-        # Show only view columns whose names match known PK/FK names (avoids 500-col views)
-        matching_cols = sorted(known_fk_col_names)
-        col_info = fetch_column_info(cursor, v_schema, v_name, matching_cols) if matching_cols else {}
+        if all_columns:
+            col_info = fetch_all_column_info(cursor, v_schema, v_name)
+        else:
+            matching_cols = sorted(known_col_names)
+            col_info = fetch_column_info(cursor, v_schema, v_name, matching_cols) if matching_cols else {}
         if col_info:
             views_data[(v_schema, v_name)] = (col_info, set())
 
@@ -252,17 +302,39 @@ def build_diagram(cursor, base_schema, base_table):
 
 
 def run():
+    parser = argparse.ArgumentParser(description="Generate DBML diagrams from an MSSQL schema.")
+    parser.add_argument(
+        "--all-columns",
+        action="store_true",
+        default=False,
+        help="Include all columns in each table (default: keys and FK columns only)",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        metavar="N",
+        help="How many FK relationship levels to traverse (default: 1)",
+    )
+    args = parser.parse_args()
+
+    if args.depth < 1:
+        parser.error("--depth must be at least 1")
+
     base_tables = load_base_tables()
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     print(f"Connecting to {os.environ['MSSQL_SERVER']} / {os.environ['MSSQL_DATABASE']} ...")
+    print(f"Options: depth={args.depth}, all_columns={args.all_columns}")
     conn = get_connection()
     cursor = conn.cursor()
 
     for table_id, schema, table in base_tables:
         print(f"\nProcessing {schema}.{table} ...", end=" ", flush=True)
         try:
-            tables_data, views_data, fk_rows = build_diagram(cursor, schema, table)
+            tables_data, views_data, fk_rows = build_diagram(
+                cursor, schema, table, depth=args.depth, all_columns=args.all_columns
+            )
             dbml = generate_dbml(schema, table, tables_data, views_data, fk_rows)
             out_path = OUTPUT_DIR / f"{table_id}-{schema}-{table}.dbml"
             out_path.write_text(dbml, encoding="utf-8")
