@@ -8,8 +8,6 @@ from pathlib import Path
 import pyodbc
 from dotenv import load_dotenv
 
-INCLUDE_VIEWS = False
-
 
 def resolve_default_output_dir():
     base = Path("MSSQL2DBML")
@@ -273,7 +271,7 @@ def generate_dbml(base_schema, base_table, tables_data, views_data, relationship
 
 # ── main diagram builder ───────────────────────────────────────────────────────
 
-def build_diagram(cursor, base_schema, base_table, depth=1, all_columns=True, restrict_schema=None):
+def build_diagram(cursor, base_schema, base_table, depth=1, all_columns=True, restrict_schema=None, include_views=False):
     # BFS: expand FK neighbours up to `depth` levels
     visited = {(base_schema, base_table)}
     frontier = {(base_schema, base_table)}
@@ -338,7 +336,7 @@ def build_diagram(cursor, base_schema, base_table, depth=1, all_columns=True, re
             is_base = key == (base_schema, base_table)
             tables_data[key] = (col_info, pk_map[key], is_base)
 
-    if not INCLUDE_VIEWS:
+    if not include_views:
         return tables_data, {}, diagram_fks
 
     view_keys = fetch_dependent_views(cursor, base_schema, base_table)
@@ -360,7 +358,7 @@ def build_diagram(cursor, base_schema, base_table, depth=1, all_columns=True, re
     return tables_data, views_data, diagram_fks
 
 
-def build_schema_diagram(cursor, schema, depth=1, all_columns=True, restrict_schema=None):
+def build_schema_diagram(cursor, schema, depth=1, all_columns=True, restrict_schema=None, include_views=False):
     schema_table_names = fetch_schema_tables(cursor, schema)
     base_keys = {(schema, t) for t in schema_table_names}
     visited = set(base_keys)
@@ -420,7 +418,7 @@ def build_schema_diagram(cursor, schema, depth=1, all_columns=True, restrict_sch
             col_info = fetch_column_info(cursor, *key, cols) if cols else {}
             tables_data[key] = (col_info, pk_map[key], key in base_keys)
 
-    if not INCLUDE_VIEWS:
+    if not include_views:
         return tables_data, {}, diagram_fks
 
     views_data = {}
@@ -560,10 +558,11 @@ def run():
         epilog=(
             "examples:\n"
             "  %(prog)s                              use tables.csv, default options\n"
-            "  %(prog)s --keys-only --depth 3         FK/PK columns only, follow 3 FK hops\n"
+            "  %(prog)s -k --depth 3                 FK/PK columns only, follow 3 FK hops\n"
+            "  %(prog)s -v                           include dependent views\n"
             "  %(prog)s -s dbo                       combined diagram for dbo schema\n"
             "  %(prog)s -s dbo -o                    dbo schema, no cross-schema FKs\n"
-            "  %(prog)s -s dbo -o --keys-only         same, FK/PK columns only\n"
+            "  %(prog)s -s dbo -o -k                 same, FK/PK columns only\n"
             "  %(prog)s -s dbo -t Orders             single-table diagram for dbo.Orders\n"
             "  %(prog)s -s dbo -q                    auto-correct case mismatches\n"
             "  %(prog)s -d ./my-diagrams             write output to ./my-diagrams/\n"
@@ -571,10 +570,16 @@ def run():
         ),
     )
     parser.add_argument(
-        "--keys-only",
+        "--keys-only", "-k",
         action="store_true",
         default=False,
         help="include only FK and PK columns in each table (default: all columns)",
+    )
+    parser.add_argument(
+        "--include-views", "-v",
+        action="store_true",
+        default=False,
+        help="include views that depend on the base table(s)",
     )
     parser.add_argument(
         "--depth",
@@ -649,7 +654,7 @@ def run():
     cursor = conn.cursor()
 
     print(f"Options: depth={args.depth}, keys_only={args.keys_only}, "
-          f"complete_schema_only={args.complete_schema_only}, quiet={quiet}")
+          f"include_views={args.include_views}, complete_schema_only={args.complete_schema_only}, quiet={quiet}")
 
     if args.table:
         # ── single-table mode ──────────────────────────────────────────────────
@@ -663,6 +668,7 @@ def run():
         try:
             tables_data, views_data, fk_rows = build_diagram(
                 cursor, schema, table, depth=args.depth, all_columns=not args.keys_only,
+                include_views=args.include_views,
             )
             dbml = generate_dbml(schema, table, tables_data, views_data, fk_rows)
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -688,7 +694,7 @@ def run():
         try:
             tables_data, views_data, fk_rows = build_schema_diagram(
                 cursor, resolved_schema, depth=args.depth, all_columns=not args.keys_only,
-                restrict_schema=restrict_schema,
+                restrict_schema=restrict_schema, include_views=args.include_views,
             )
             dbml = generate_dbml(
                 resolved_schema, None, tables_data, views_data, fk_rows,
@@ -717,6 +723,7 @@ def run():
             try:
                 tables_data, views_data, fk_rows = build_diagram(
                     cursor, schema, table, depth=args.depth, all_columns=not args.keys_only,
+                    include_views=args.include_views,
                 )
                 dbml = generate_dbml(schema, table, tables_data, views_data, fk_rows)
                 output_dir.mkdir(parents=True, exist_ok=True)

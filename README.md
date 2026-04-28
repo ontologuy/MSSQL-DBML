@@ -183,19 +183,14 @@ Use `--quiet` / `-q` to skip the prompt entirely: unambiguous mismatches are cor
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--keys-only` | | Include only FK and PK columns (default: all columns) |
+| `--keys-only` | `-k` | Include only FK and PK columns (default: all columns) |
+| `--include-views` | `-v` | Include views that depend on the base table(s) |
 | `--depth N` | | FK hops to follow from each base table (default: 1) |
 | `--schema SCHEMA` | `-s` | Generate a combined diagram for all tables in SCHEMA |
 | `--table TABLE` | `-t` | Generate a diagram for a single TABLE; requires `--schema` |
 | `--complete-schema-only` | `-o` | With `--schema`, exclude cross-schema FK relationships |
 | `--output DIR` | `-d` | Write output to DIR (created if absent) |
 | `--quiet` | `-q` | Auto-correct case mismatches; skip ambiguous/missing items |
-
-## Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `INCLUDE_VIEWS` | `False` | Set to `True` in `generate_diagrams.py` to include views that depend on the base table |
 
 ## Files
 
