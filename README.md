@@ -66,7 +66,16 @@ docker run --rm \
   -v $(pwd)/tables.csv:/app/tables.csv \
   -v $(pwd)/diagrams:/output \
   ghcr.io/ontologuy/mssql-dbml \
-  -d /output
+  -O /output
+```
+
+You can also pass connection flags directly instead of using `--env-file`:
+
+```bash
+docker run --rm \
+  -v $(pwd)/diagrams:/output \
+  ghcr.io/ontologuy/mssql-dbml \
+  -a sa@10.0.0.1 -d MyDB -P mysecret -O /output
 ```
 
 ### Schema mode
@@ -76,7 +85,7 @@ docker run --rm \
   --env-file .env \
   -v $(pwd)/diagrams:/output \
   ghcr.io/ontologuy/mssql-dbml \
-  -s dbo -d /output
+  -s dbo -O /output
 ```
 
 ### Single-table mode
@@ -86,14 +95,14 @@ docker run --rm \
   --env-file .env \
   -v $(pwd)/diagrams:/output \
   ghcr.io/ontologuy/mssql-dbml \
-  -s dbo -t Orders -d /output
+  -s dbo -t Orders -O /output
 ```
 
 ### Build the image locally
 
 ```bash
 docker build -t mssql-dbml .
-docker run --rm --env-file .env -v $(pwd)/diagrams:/output mssql-dbml -s dbo -d /output
+docker run --rm --env-file .env -v $(pwd)/diagrams:/output mssql-dbml -s dbo -O /output
 ```
 
 ## Usage
@@ -152,14 +161,32 @@ Output is a single file named `<schema>.dbml` (e.g. `dbo.dbml`).
 
 Output is a single file named `<schema>-<table>.dbml` (e.g. `dbo-Orders.dbml`).
 
+### Connection flags
+
+All connection parameters can be passed on the command line, overriding `.env`:
+
+```bash
+# Windows Authentication
+.venv/bin/python3 generate_diagrams.py -a myserver -d MyDB -w -s dbo
+
+# SQL Authentication — user@host shorthand, prompt for password
+.venv/bin/python3 generate_diagrams.py -a sa@10.0.0.1 -d MyDB -P -s dbo
+
+# SQL Authentication — explicit credentials
+.venv/bin/python3 generate_diagrams.py -a 10.0.0.1 -d MyDB -u sa -P secret -s dbo
+
+# Non-default port
+.venv/bin/python3 generate_diagrams.py -a myserver -d MyDB -p 1434 -w -s dbo
+```
+
 ### Specifying an output folder
 
 ```bash
 # Write to a specific folder (created if it doesn't exist)
-.venv/bin/python3 generate_diagrams.py -d /path/to/my-diagrams
+.venv/bin/python3 generate_diagrams.py -O /path/to/my-diagrams
 
 # Schema mode with custom output dir
-.venv/bin/python3 generate_diagrams.py -s dbo -d /path/to/my-diagrams
+.venv/bin/python3 generate_diagrams.py -s dbo -O /path/to/my-diagrams
 ```
 
 By default, output goes to a new subdirectory under `MSSQL2DBML/` in the current working directory, named by today's date with an incrementing suffix — e.g. `MSSQL2DBML/2026-04-24-0001`. Each run creates the next available suffix so previous runs are never overwritten. The folder is only created if at least one file is successfully written.
@@ -181,6 +208,19 @@ Use `--quiet` / `-q` to skip the prompt entirely: unambiguous mismatches are cor
 
 ## Flags
 
+### Connection
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--address [USER@]HOST` | `-a` | Server hostname or IP; optionally prefix `user@` to set `--user` |
+| `--database DATABASE` | `-d` | Database name (overrides `MSSQL_DATABASE` in `.env`) |
+| `--port PORT` | `-p` | Server port (default: 1433) |
+| `--windows-auth` | `-w` | Use Windows Authentication; skips `--user`/`--password` |
+| `--user USER` | `-u` | SQL login username (overrides `MSSQL_USERNAME` in `.env`) |
+| `--password [PASSWORD]` | `-P` | SQL login password; omit value to prompt interactively |
+
+### Output
+
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--keys-only` | `-k` | Include only FK and PK columns (default: all columns) |
@@ -189,7 +229,7 @@ Use `--quiet` / `-q` to skip the prompt entirely: unambiguous mismatches are cor
 | `--schema SCHEMA` | `-s` | Generate a combined diagram for all tables in SCHEMA |
 | `--table TABLE` | `-t` | Generate a diagram for a single TABLE; requires `--schema` |
 | `--complete-schema-only` | `-o` | With `--schema`, exclude cross-schema FK relationships |
-| `--output DIR` | `-d` | Write output to DIR (created if absent) |
+| `--output DIR` | `-O` | Write output to DIR (created if absent) |
 | `--quiet` | `-q` | Auto-correct case mismatches; skip ambiguous/missing items |
 
 ## Files

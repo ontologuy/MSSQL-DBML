@@ -1,5 +1,6 @@
 import argparse
 import csv
+import getpass
 import os
 import sys
 from datetime import date
@@ -565,8 +566,11 @@ def run():
             "  %(prog)s -s dbo -o -k                 same, FK/PK columns only\n"
             "  %(prog)s -s dbo -t Orders             single-table diagram for dbo.Orders\n"
             "  %(prog)s -s dbo -q                    auto-correct case mismatches\n"
-            "  %(prog)s -d ./my-diagrams             write output to ./my-diagrams/\n"
-            "  %(prog)s -s dbo -d ./my-diagrams -q   schema mode, custom dir, quiet"
+            "  %(prog)s -O ./my-diagrams             write output to ./my-diagrams/\n"
+            "  %(prog)s -s dbo -O ./my-diagrams -q   schema mode, custom dir, quiet\n"
+            "  %(prog)s -a 10.0.0.1 -d MyDB -w           Windows Auth, override server and db\n"
+            "  %(prog)s -a sa@10.0.0.1 -d MyDB -P        SQL Auth, prompt for password\n"
+            "  %(prog)s -a 10.0.0.1 -d MyDB -p 1434      non-default port"
         ),
     )
     parser.add_argument(
@@ -605,7 +609,7 @@ def run():
         help="with --schema, exclude FK relationships that cross into other schemas",
     )
     parser.add_argument(
-        "--output", "-d",
+        "--output", "-O",
         metavar="DIR",
         default=None,
         help="write output to DIR (created if absent; default: MSSQL2DBML/YYYY-MM-DD-NNNN)",
@@ -618,6 +622,42 @@ def run():
             "auto-correct unambiguous case mismatches without prompting; "
             "skip items with no match or multiple matches and log as errors"
         ),
+    )
+    parser.add_argument(
+        "--address", "-a",
+        metavar="[USER@]HOST",
+        help="server hostname or IP; optionally prefix user@ to set --user",
+    )
+    parser.add_argument(
+        "--database", "-d",
+        metavar="DATABASE",
+        help="database name (overrides MSSQL_DATABASE in .env)",
+    )
+    parser.add_argument(
+        "--port", "-p",
+        type=int,
+        metavar="PORT",
+        default=None,
+        help="server port (default: 1433)",
+    )
+    parser.add_argument(
+        "--windows-auth", "-w",
+        action="store_true",
+        default=False,
+        help="use Windows Authentication (Trusted_Connection=yes); skips --user/--password",
+    )
+    parser.add_argument(
+        "--user", "-u",
+        metavar="USER",
+        help="SQL login username (overrides MSSQL_USERNAME in .env)",
+    )
+    parser.add_argument(
+        "--password", "-P",
+        metavar="PASSWORD",
+        nargs="?",
+        const=...,
+        default=None,
+        help="SQL login password; omit value to prompt interactively",
     )
     args = parser.parse_args()
 
@@ -634,22 +674,58 @@ def run():
     quiet = args.quiet
     accept_all = False
 
+    # Parse optional user@ prefix from --address
+    cli_user = args.user
+    if args.address and "@" in args.address:
+        at = args.address.index("@")
+        if cli_user is None:
+            cli_user = args.address[:at]
+        address_host = args.address[at + 1:]
+    else:
+        address_host = args.address
+
     load_dotenv()
-    missing = [v for v in ("MSSQL_SERVER", "MSSQL_DATABASE", "MSSQL_USERNAME", "MSSQL_PASSWORD")
-               if not os.environ.get(v)]
-    if missing:
-        parser.error(f"missing required environment variable(s): {', '.join(missing)}")
+
+    # Resolve each connection parameter: CLI > .env > default
+    server = address_host or os.environ.get("MSSQL_SERVER") or os.environ.get("MSSQL_HOST")
+    database = args.database or os.environ.get("MSSQL_DATABASE")
+    port = args.port or int(os.environ.get("MSSQL_PORT", "1433"))
+    windows_auth = args.windows_auth or os.environ.get("MSSQL_WINDOWS_AUTH", "").lower() in ("true", "1", "yes")
+
+    if not server:
+        parser.error("server address required: use --address/-a or set MSSQL_SERVER in .env")
+    if not database:
+        parser.error("database required: use --database/-d or set MSSQL_DATABASE in .env")
+
+    server_str = f"{server},{port}"
+
+    if windows_auth:
+        auth_part = "Trusted_Connection=yes;"
+    else:
+        user = cli_user or os.environ.get("MSSQL_USERNAME")
+        if not user:
+            parser.error("username required: use --user/-u, user@address, or set MSSQL_USERNAME in .env")
+
+        if args.password is ...:
+            password = getpass.getpass(f"Password for {user}@{server}: ")
+        elif args.password is not None:
+            password = args.password
+        else:
+            password = os.environ.get("MSSQL_PASSWORD")
+            if not password:
+                password = getpass.getpass(f"Password for {user}@{server}: ")
+
+        auth_part = f"UID={user};PWD={password};"
 
     connection_string = (
         "DRIVER={ODBC Driver 18 for SQL Server};"
-        f"SERVER={os.environ['MSSQL_SERVER']};"
-        f"DATABASE={os.environ['MSSQL_DATABASE']};"
-        f"UID={os.environ['MSSQL_USERNAME']};"
-        f"PWD={os.environ['MSSQL_PASSWORD']};"
+        f"SERVER={server_str};"
+        f"DATABASE={database};"
+        f"{auth_part}"
         "TrustServerCertificate=yes;"
     )
 
-    print(f"Connecting to {os.environ['MSSQL_SERVER']} / {os.environ['MSSQL_DATABASE']} ...")
+    print(f"Connecting to {server_str} / {database} ...")
     conn = pyodbc.connect(connection_string)
     cursor = conn.cursor()
 
