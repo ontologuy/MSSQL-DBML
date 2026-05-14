@@ -697,7 +697,10 @@ def run():
     if not database:
         parser.error("database required: use --database/-d or set MSSQL_DATABASE in .env")
 
-    server_str = f"{server},{port}"
+    if "\\" in server:
+        server_str = server
+    else:
+        server_str = f"{server},{port}"
 
     if windows_auth:
         auth_part = "Trusted_Connection=yes;"
